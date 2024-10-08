@@ -8,15 +8,8 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
-
-type Coordinator struct {
-	// Your definitions here.
-	MapTasks    []MapTask
-	ReduceTasks []ReduceTask
-
-	mu sync.Mutex
-}
 
 type TaskType int
 
@@ -24,18 +17,6 @@ const (
 	MAP TaskType = iota
 	REDUCE
 )
-
-type MapTask struct {
-	Id    int
-	File  string
-	State TaskState
-}
-
-type ReduceTask struct {
-	Id     int
-	State  TaskState
-	Worker int
-}
 
 type TaskState int
 
@@ -45,35 +26,44 @@ const (
 	COMPLETED
 )
 
+type Task struct {
+	Id        int
+	Input     string
+	ReduceNum int
+	State     TaskState
+	Type      TaskType
+	StartedAt time.Time
+}
+
+type Coordinator struct {
+	// Your definitions here.
+	NumMap    int
+	NumReduce int
+
+	Tasks []Task
+
+	mu sync.Mutex
+}
+
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// find idle or in-progress task in map
-	for _, task := range c.MapTasks {
+	// find idle or in-progress task
+	for i, task := range c.Tasks {
 		if task.State == IDLE {
-			fmt.Printf("assigning task %v of type %v!\n", task.Id, MAP)
-			reply.Filename = task.File
+			fmt.Printf("assigning task %v of type %v!\n", task.Id, task.Type)
+			reply.Input = task.Input
 			reply.Id = task.Id
-			reply.NumReduce = len(c.ReduceTasks)
-			reply.Type = MAP
+			reply.NumMap = c.NumMap
+			reply.NumReduce = c.NumReduce
+			reply.Type = task.Type
+			reply.ReduceNum = task.ReduceNum
 
-			task.State = IN_PROGRESS
+			c.Tasks[i].State = IN_PROGRESS
 
-			return nil
-		}
-	}
-
-	// find idle or in-progress reduce task in reduce
-	for _, task := range c.ReduceTasks {
-		if task.State == IDLE {
-			fmt.Printf("assigning task %v of type %v!\n", task.Id, REDUCE)
-			reply.Id = task.Id
-			reply.NumMap = len(c.MapTasks)
-			reply.Type = REDUCE
-
-			task.State = IN_PROGRESS
+			go c.waitForTask(task.Id)
 
 			return nil
 		}
@@ -88,23 +78,22 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Printf("completing task %v of type %v!\n", args.Id, args.Type)
+	fmt.Printf("completing task %v of type %v!\n", args.Id, c.Tasks[args.Id].Type)
 
-	if args.Type == MAP {
-		c.MapTasks[args.Id].State = COMPLETED
-	} else {
-		c.ReduceTasks[args.Id].State = COMPLETED
-	}
+	c.Tasks[args.Id].State = COMPLETED
 
 	return nil
 }
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
+func (c *Coordinator) waitForTask(id int) {
+	time.Sleep(10 * time.Second)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.Tasks[id].State == IN_PROGRESS {
+		c.Tasks[id].State = IDLE
+	}
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -127,13 +116,8 @@ func (c *Coordinator) Done() bool {
 	ret := true
 
 	// Your code here.
-	for _, task := range c.MapTasks {
-		if task.State != COMPLETED {
-			return false
-		}
-	}
 
-	for _, task := range c.ReduceTasks {
+	for _, task := range c.Tasks {
 		if task.State != COMPLETED {
 			return false
 		}
@@ -149,22 +133,26 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
+	c.NumMap = len(files)
+	c.NumReduce = nReduce
 
-	// map
-	c.MapTasks = make([]MapTask, len(files))
-	for i := 0; i < len(files); i++ {
-		c.MapTasks[i] = MapTask{
-			Id:   i,
-			File: files[i],
-		}
+	// tasks
+	c.Tasks = []Task{}
+	for i, file := range files {
+		c.Tasks = append(c.Tasks, Task{
+			Id:    i,
+			Input: file,
+			Type:  MAP,
+		})
 	}
 
 	// reduce
-	c.ReduceTasks = make([]ReduceTask, nReduce)
 	for i := 0; i < nReduce; i++ {
-		c.ReduceTasks[i] = ReduceTask{
-			Id: i,
-		}
+		c.Tasks = append(c.Tasks, Task{
+			Id:        c.NumMap + i,
+			ReduceNum: i,
+			Type:      REDUCE,
+		})
 	}
 
 	c.server()
