@@ -8,9 +8,12 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
+
+const TaskInterval = time.Millisecond * 200
 
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
@@ -51,26 +54,24 @@ func Worker(mapf func(string, string) []KeyValue,
 		reply := CallGetTask()
 
 		// handle task
-		if reply.Id >= 0 {
-			var completed bool
-			if reply.Type == MAP {
-				completed = HandleMapTask(mapf, reply)
-			} else {
-				completed = HandleReduceTask(reducef, reply)
-			}
-
-			// complete task
-			if completed {
-				CallCompleteTask(reply.Id, reply.Type)
-			}
+		var success bool
+		if reply.Type == Map {
+			success = HandleMapTask(mapf, reply)
+		} else if reply.Type == Reduce {
+			success = HandleReduceTask(reducef, reply)
+		} else if reply.Type == Exit {
+			return
 		}
 
-		time.Sleep(time.Second)
+		// do nothing on no task
+
+		// complete task
+		if success {
+			CallCompleteTask(reply.Index, reply.Type)
+		}
+
+		time.Sleep(TaskInterval)
 	}
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
-
 }
 
 func HandleMapTask(mapf func(string, string) []KeyValue, reply *GetTaskReply) bool {
@@ -85,13 +86,13 @@ func HandleMapTask(mapf func(string, string) []KeyValue, reply *GetTaskReply) bo
 
 	for _, kv := range kva {
 		// hash key
-		reduceNum := ihash(kv.Key) % reply.NumReduce
-		group[reduceNum] = append(group[reduceNum], kv)
+		reduceId := ihash(kv.Key) % reply.NumReduce
+		group[reduceId] = append(group[reduceId], kv)
 	}
 
-	for reduceNum, kva := range group {
+	for reduceId, kva := range group {
 		// write to intermediate file
-		iname := fmt.Sprintf("mr-%d-%d", reply.Id, reduceNum)
+		iname := fmt.Sprintf("mr-%d-%d", reply.Index, reduceId)
 		ifile, _ := os.Create(iname)
 
 		enc := json.NewEncoder(ifile)
@@ -110,14 +111,11 @@ func HandleMapTask(mapf func(string, string) []KeyValue, reply *GetTaskReply) bo
 
 func HandleReduceTask(reducef func(string, []string) string, reply *GetTaskReply) bool {
 	// read intemediates
-	intermediate := ReadIntermediate(reply.ReduceNum, reply.NumMap)
-	if intermediate == nil {
-		return false
-	}
+	intermediate := ReadIntermediate(reply.Index)
 
 	sort.Sort(ByKey(intermediate))
 
-	oname := fmt.Sprintf("mr-out-%d", reply.ReduceNum)
+	oname := fmt.Sprintf("mr-out-%d", reply.Index)
 	ofile, _ := os.Create(oname)
 
 	// call Reduce on each distinct key in intermediate[],
@@ -159,9 +157,10 @@ func CallGetTask() *GetTaskReply {
 	}
 }
 
-func CallCompleteTask(id int, taskType TaskType) *CompleteTaskReply {
+func CallCompleteTask(taskIndex int, taskType TaskType) *CompleteTaskReply {
 	args := CompleteTaskArgs{
-		Id: id,
+		Index: taskIndex,
+		Type:  taskType,
 	}
 
 	reply := CompleteTaskReply{}
@@ -170,7 +169,7 @@ func CallCompleteTask(id int, taskType TaskType) *CompleteTaskReply {
 	if ok {
 		return &reply
 	} else {
-		fmt.Printf("cannot complete task %v of type %v!\n", id, taskType)
+		fmt.Printf("cannot complete task %v of type %v!\n", taskIndex, taskType)
 		return nil
 	}
 }
@@ -189,15 +188,21 @@ func ReadInput(filename string) string {
 	return string(content)
 }
 
-func ReadIntermediate(id, nMap int) []KeyValue {
+func ReadIntermediate(reduceId int) []KeyValue {
 	kva := []KeyValue{}
-	for i := 0; i < nMap; i++ {
-		filename := fmt.Sprintf("mr-%d-%d", i, id)
+	// get all intermediate filenames of the reduce task
+	filenames, err := filepath.Glob(fmt.Sprintf("mr-*-%d", reduceId))
+	if err != nil {
+		log.Printf("cannot read intermediate files of reduce id %v", reduceId)
+		return nil
+	}
+	for _, filename := range filenames {
+		// read intermediate file
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Printf("cannot read %v", filename)
-			return nil
+			log.Fatalf("cannot read %v", filename)
 		}
+		// decode
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue

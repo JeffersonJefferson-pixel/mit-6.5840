@@ -11,28 +11,30 @@ import (
 	"time"
 )
 
+const TaskTimeout = 10 * time.Second
+
 type TaskType int
 
 const (
-	MAP TaskType = iota
-	REDUCE
+	Map TaskType = iota
+	Reduce
+	NoTask
+	Exit
 )
 
 type TaskState int
 
 const (
-	IDLE TaskState = iota
-	IN_PROGRESS
-	COMPLETED
+	Idle TaskState = iota
+	InProgress
+	Completed
 )
 
 type Task struct {
-	Id        int
-	Input     string
-	ReduceNum int
-	State     TaskState
-	Type      TaskType
-	StartedAt time.Time
+	Index int
+	Input string
+	State TaskState
+	Type  TaskType
 }
 
 type Coordinator struct {
@@ -40,7 +42,8 @@ type Coordinator struct {
 	NumMap    int
 	NumReduce int
 
-	Tasks []Task
+	MapTasks    []Task
+	ReduceTasks []Task
 
 	mu sync.Mutex
 }
@@ -50,26 +53,21 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// find idle or in-progress task
-	for i, task := range c.Tasks {
-		if task.State == IDLE {
-			fmt.Printf("assigning task %v of type %v!\n", task.Id, task.Type)
-			reply.Input = task.Input
-			reply.Id = task.Id
-			reply.NumMap = c.NumMap
-			reply.NumReduce = c.NumReduce
-			reply.Type = task.Type
-			reply.ReduceNum = task.ReduceNum
-
-			c.Tasks[i].State = IN_PROGRESS
-
-			go c.waitForTask(task.Id)
-
-			return nil
-		}
+	var task *Task
+	// find idle task
+	if c.NumMap > 0 {
+		task = c.selectTask(c.MapTasks)
+	} else if c.NumReduce > 0 {
+		task = c.selectTask(c.ReduceTasks)
+	} else {
+		task = &Task{-1, "", Completed, Exit}
 	}
+	reply.Index = task.Index
+	reply.Input = task.Input
+	reply.NumReduce = len(c.ReduceTasks)
+	reply.Type = task.Type
 
-	reply.Id = -1
+	go c.waitForTask(task)
 
 	return nil
 }
@@ -78,21 +76,49 @@ func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskRe
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Printf("completing task %v of type %v!\n", args.Id, c.Tasks[args.Id].Type)
-
-	c.Tasks[args.Id].State = COMPLETED
+	if args.Type == Map {
+		if c.MapTasks[args.Index].State == InProgress {
+			c.MapTasks[args.Index].State = Completed
+			c.NumMap--
+		}
+	} else if args.Type == Reduce {
+		if c.ReduceTasks[args.Index].State == InProgress {
+			c.ReduceTasks[args.Index].State = Completed
+			c.NumReduce--
+		}
+	} else {
+		fmt.Printf("Incorrect task type to complete: %v\n", args.Type)
+	}
 
 	return nil
 }
 
-func (c *Coordinator) waitForTask(id int) {
-	time.Sleep(10 * time.Second)
+func (c *Coordinator) selectTask(tasks []Task) *Task {
+	var task *Task
+	for i := 0; i < len(tasks); i++ {
+		task = &tasks[i]
+		if task.State == Idle {
+			task.State = InProgress
+
+			return task
+		}
+	}
+
+	return &Task{-1, "", Completed, NoTask}
+}
+
+func (c *Coordinator) waitForTask(task *Task) {
+	if task.Type != Map && task.Type != Reduce {
+		return
+	}
+
+	<-time.After(TaskTimeout)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.Tasks[id].State == IN_PROGRESS {
-		c.Tasks[id].State = IDLE
+	if task.State == InProgress {
+		task.State = Idle
 	}
 }
 
@@ -113,17 +139,9 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := true
-
 	// Your code here.
 
-	for _, task := range c.Tasks {
-		if task.State != COMPLETED {
-			return false
-		}
-	}
-
-	return ret
+	return c.NumMap == 0 && c.NumReduce == 0
 }
 
 // create a Coordinator.
@@ -136,23 +154,25 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.NumMap = len(files)
 	c.NumReduce = nReduce
 
-	// tasks
-	c.Tasks = []Task{}
+	// map tasks
+	c.MapTasks = make([]Task, 0, c.NumMap)
 	for i, file := range files {
-		c.Tasks = append(c.Tasks, Task{
-			Id:    i,
+		mapTask := Task{
+			Index: i,
 			Input: file,
-			Type:  MAP,
-		})
+			Type:  Map,
+		}
+		c.MapTasks = append(c.MapTasks, mapTask)
 	}
 
-	// reduce
+	// reduce tasks
+	c.ReduceTasks = make([]Task, 0, c.NumReduce)
 	for i := 0; i < nReduce; i++ {
-		c.Tasks = append(c.Tasks, Task{
-			Id:        c.NumMap + i,
-			ReduceNum: i,
-			Type:      REDUCE,
-		})
+		reduceTask := Task{
+			Index: i,
+			Type:  Reduce,
+		}
+		c.ReduceTasks = append(c.ReduceTasks, reduceTask)
 	}
 
 	c.server()

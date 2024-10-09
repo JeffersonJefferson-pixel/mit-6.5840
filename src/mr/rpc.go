@@ -16,16 +16,15 @@ type GetTaskArgs struct {
 }
 
 type GetTaskReply struct {
-	Id        int
+	Index     int
 	Input     string
-	ReduceNum int
-	NumMap    int
 	NumReduce int
 	Type      TaskType
 }
 
 type CompleteTaskArgs struct {
-	Id int
+	Index int
+	Type  TaskType
 }
 
 type CompleteTaskReply struct {
