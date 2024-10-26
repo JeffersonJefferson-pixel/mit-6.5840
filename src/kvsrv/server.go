@@ -42,7 +42,7 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	// detect duplicate
-	response := kv.detectDuplicate(args.ClientId, args.RequestId)
+	response := kv.DetectDuplicate(args.ClientId, args.RequestId)
 	if response != nil {
 		return
 	}
@@ -59,7 +59,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 
 	// detect duplicate
-	response := kv.detectDuplicate(args.ClientId, args.RequestId)
+	response := kv.DetectDuplicate(args.ClientId, args.RequestId)
 	if response != nil {
 		reply.Value = *response
 		return
@@ -73,7 +73,7 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.responses[args.ClientId] = Response{args.RequestId, value}
 }
 
-func (kv *KVServer) detectDuplicate(clientId, requestId int64) *string {
+func (kv *KVServer) DetectDuplicate(clientId, requestId int64) *string {
 	if response, ok := kv.responses[clientId]; ok {
 		if response.requestId >= requestId {
 			// duplicate detected
