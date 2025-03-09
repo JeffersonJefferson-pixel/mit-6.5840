@@ -276,8 +276,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // currentTerm for leader to update itself.
-	Success bool // whether follower contained entry matching prevLogIndex and prevLogTerm.
+	Term          int  // currentTerm for leader to update itself.
+	Success       bool // whether follower contained entry matching prevLogIndex and prevLogTerm.
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -291,6 +293,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// it should no longer be leader
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		reply.ConflictIndex = -1
+		reply.ConflictTerm = -1
 		return
 	}
 
@@ -299,18 +303,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.becomeFollower(args.Term)
 	}
 
+	lastLogIndex := rf.getLastLogIndex()
 	sendToChannel(rf.heartbeatCh, true)
 
+	reply.Term = rf.currentTerm
+	reply.Success = false
+	reply.ConflictIndex = -1
+	reply.ConflictTerm = -1
+
+	// shorter log index
+	if lastLogIndex < args.PrevLogIndex {
+		reply.ConflictIndex = lastLogIndex + 1
+		return
+	}
+
 	// server doesn't contain an entry at prevLogIndex with matching prevLogTerm
-	if rf.getLastLogIndex() < args.PrevLogIndex || rf.getLastLogTerm() != args.PrevLogTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
+	if rf.getLastLogTerm() != args.PrevLogTerm {
+		reply.ConflictTerm = args.PrevLogTerm
+		// find last matching log index in the conflict term
+		for i := args.PrevLogIndex; i >= 0 && rf.log[i].Term == args.PrevLogTerm; i-- {
+			reply.ConflictIndex = i
+		}
 		return
 	}
 
 	// handle conflicting log entries
 	i, j := args.PrevLogIndex+1, 0
-	for ; i < rf.getLastLogIndex()+1 && j < len(args.Entries); i, j = i+1, j+1 {
+	for ; i < lastLogIndex+1 && j < len(args.Entries); i, j = i+1, j+1 {
 		if rf.log[i].Term != args.Entries[j].Term {
 			break
 		}
@@ -359,13 +378,28 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	if reply.Success {
 		//update next index and match index for follower
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		matchIndex := args.PrevLogIndex + len(args.Entries)
+		if matchIndex > rf.matchIndex[server] {
+			rf.matchIndex[server] = matchIndex
+		}
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
+	} else if reply.ConflictTerm == -1 {
+		// conflicting index case
+		rf.nextIndex[server] = reply.ConflictIndex
+		rf.matchIndex[server] = rf.nextIndex[server] - 1
 	} else {
-		// follower has incosistent log
-		// decrement follower next index
-		if rf.nextIndex[server] >= 2 {
-			rf.nextIndex[server]--
+		// conflicting term case
+		// find conflict term in log
+		nextIndex := rf.getLastLogIndex()
+		for ; nextIndex >= 0; nextIndex-- {
+			if rf.log[nextIndex].Term == reply.ConflictTerm {
+				break
+			}
+		}
+		if nextIndex < 0 {
+			rf.nextIndex[server] = reply.ConflictIndex
+		} else {
+			rf.nextIndex[server] = nextIndex
 		}
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 	}
