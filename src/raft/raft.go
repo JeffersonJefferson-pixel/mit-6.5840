@@ -177,6 +177,7 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	DPrintf("[%v, %v]: recieved request vote from %v at %v", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -202,7 +203,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// grant vote
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		rf.grantVoteCh <- true
+		sendToChannel(rf.grantVoteCh, true)
 	}
 }
 
@@ -260,7 +261,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		// if received vote from majority, become the leader
 		if rf.voteCount >= len(rf.peers)/2+1 {
 			// send to win elect channel
-			rf.winElectCh <- true
+			sendToChannel(rf.winElectCh, true)
 		}
 	}
 }
@@ -280,6 +281,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	DPrintf("[%v, %v]: recieved append entries from %v at %v", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	commitIndex := rf.commitIndex
@@ -297,7 +299,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.becomeFollower(args.Term)
 	}
 
-	rf.heartbeatCh <- true
+	sendToChannel(rf.heartbeatCh, true)
 
 	// server doesn't contain an entry at prevLogIndex with matching prevLogTerm
 	if rf.getLastLogIndex() < args.PrevLogIndex || rf.getLastLogTerm() != args.PrevLogTerm {
@@ -334,6 +336,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	DPrintf("[%v, %v]: send append entries to %v", rf.me, rf.currentTerm, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if !ok {
 		return
@@ -470,12 +473,13 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) getElectionTimeout() time.Duration {
-	// between 500ms to 1000ms
-	ms := 500 + (rand.Int63() % 500)
+	// between 360ms to 500ms
+	ms := 360 + (rand.Intn(240))
 	return time.Duration(ms) * time.Millisecond
 }
 
 func (rf *Raft) becomeLeader() {
+	DPrintf("[%v, %v]: become leader", rf.me, rf.currentTerm)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -520,6 +524,7 @@ func (rf *Raft) getServerNextLogEntries(server int) []LogEntry {
 }
 
 func (rf *Raft) becomeFollower(term int) {
+	DPrintf("[%v, %v]: become follower at term %v", rf.me, rf.currentTerm, term)
 
 	state := rf.state
 	rf.state = Follower
@@ -527,11 +532,12 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.votedFor = -1
 
 	if state != Follower {
-		rf.stepDownCh <- true
+		sendToChannel(rf.stepDownCh, true)
 	}
 }
 
 func (rf *Raft) becomeCandidate(fromState State) {
+	DPrintf("[%v, %v]: become candidate", rf.me, rf.currentTerm)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -599,6 +605,7 @@ func (rf *Raft) isLogUpToDate(lastLogIndex int, lastLogTerm int) bool {
 }
 
 func (rf *Raft) broadcastAppendEntries() {
+	DPrintf("[%v, %v]: broadcast append entries", rf.me, rf.currentTerm)
 	if rf.state != Leader {
 		return
 	}
@@ -621,6 +628,13 @@ func (rf *Raft) broadcastAppendEntries() {
 			go rf.sendAppendEntries(i, &args, &reply)
 		}
 
+	}
+}
+
+func sendToChannel(ch chan bool, value bool) {
+	select {
+	case ch <- value:
+	default:
 	}
 }
 
