@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"errors"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -125,6 +128,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -145,6 +155,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		panic(errors.New("decode error"))
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -203,6 +225,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// grant vote
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		// persist state.
+		rf.persist()
+
 		sendToChannel(rf.grantVoteCh, true)
 	}
 }
@@ -337,6 +362,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.log = rf.log[:i]
 	rf.log = append(rf.log, args.Entries[j:]...)
+
+	rf.persist()
+
 	reply.Term = rf.currentTerm
 	reply.Success = true
 
@@ -446,6 +474,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := rf.currentTerm
 	rf.log = append(rf.log, LogEntry{term, command})
 
+	// persist log.
+	rf.persist()
+
 	return rf.getLastLogIndex(), term, true
 }
 
@@ -542,7 +573,11 @@ func (rf *Raft) getLastLogTerm() int {
 }
 
 func (rf *Raft) getServerLastLogIndex(server int) int {
-	return rf.nextIndex[server] - 1
+	if rf.nextIndex[server]-1 >= 0 {
+		return rf.nextIndex[server] - 1
+	} else {
+		return 0
+	}
 }
 
 func (rf *Raft) getServerLastLogTerm(server int) int {
@@ -568,6 +603,8 @@ func (rf *Raft) becomeFollower(term int) {
 	if state != Follower {
 		sendToChannel(rf.stepDownCh, true)
 	}
+
+	rf.persist()
 }
 
 func (rf *Raft) becomeCandidate(fromState State) {
@@ -584,6 +621,8 @@ func (rf *Raft) becomeCandidate(fromState State) {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.voteCount = 1
+
+	rf.persist()
 
 	rf.broadcastRequestVote()
 }
